@@ -76,9 +76,6 @@ export function TruckFlatbedSvg({ width = 72, height = 40 }) {
   );
 }
 
-// Array of truck card components for cycling
-export const CARD_TRUCKS = [TruckSemiSvg, TruckBoxSvg, TruckFlatbedSvg];
-
 /**
  * Large capacity visualization — SVG truck with fill overlay
  */

@@ -1,37 +1,80 @@
-import { useState, useEffect, useCallback } from 'react';
-import { ArrowRight, Plus, Truck, MapPin, Phone, Mail, DollarSign, User } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  Calendar,
+  DollarSign,
+  Mail,
+  MapPin,
+  Package,
+  Phone,
+  RefreshCw,
+  Route,
+  Truck,
+  User,
+  Users,
+} from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { getOrdersRequest, placeBidRequest, assignOrderRequest } from '../api/orders';
 import { getVehiclesRequest, getDriversRequest } from '../api/fleet';
 import Modal from '../components/Modal';
-import { CARD_TRUCKS, CapacityTruck } from '../components/TruckSvg';
+import { CapacityTruck } from '../components/TruckSvg';
+import { CARD_TRUCKS } from '../components/truckIcons';
+import {
+  ACTIVE_ORDER_STATUSES,
+  VEHICLE_TYPE_LABELS,
+  capacityPercent,
+  formatDate,
+  formatMoney,
+  formatVolume,
+  formatWeight,
+  getApiErrorMessage,
+  getOrderCargo,
+  getOrderDriver,
+  getOrderPrice,
+  getOrderRoute,
+  getOrderVehicle,
+  getStatus,
+  normalizeList,
+  orderCode,
+} from '../utils/logistics';
 
-const STATUS_DETAIL = {
-  PUBLISHED: { label: 'Опубликован', cls: 'blue' },
-  NEGOTIATION: { label: 'Торг', cls: 'orange' },
-  APPROVED: { label: 'Принят', cls: 'blue' },
-  ASSIGNED: { label: 'Назначен', cls: 'gray' },
-  IN_TRANSIT: { label: 'В пути', cls: 'green' },
-  DELIVERED: { label: 'Завершён', cls: 'gray' },
-};
+function RouteBlock({ order }) {
+  const route = getOrderRoute(order);
 
-
+  return (
+    <div className="route-line">
+      <div className="route-point">
+        <div className="route-dot origin" />
+        <div>
+          <div className="route-city">{route.from?.city || route.from?.address || '?'}</div>
+          <div className="route-address">{route.from?.address || ''}</div>
+        </div>
+      </div>
+      <div className="route-connector" />
+      <div className="route-point">
+        <div className="route-dot dest" />
+        <div>
+          <div className="route-city">{route.to?.city || route.to?.address || '?'}</div>
+          <div className="route-address">{route.to?.address || ''}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   const { user, showToast } = useApp();
+  const userId = user?._id;
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState('active');
-  const [selectedOrder, setSelectedOrder] = useState(null);
+  const [selectedOrderId, setSelectedOrderId] = useState('');
   const [detailTab, setDetailTab] = useState('info');
 
-  // Bid
   const [bidOrder, setBidOrder] = useState(null);
-  const [bidAmount, setBidAmount] = useState('25000');
+  const [bidAmount, setBidAmount] = useState('');
   const [bidComment, setBidComment] = useState('');
   const [bidLoading, setBidLoading] = useState(false);
 
-  // Assign
   const [assignOrder, setAssignOrder] = useState(null);
   const [vehicles, setVehicles] = useState([]);
   const [drivers, setDrivers] = useState([]);
@@ -40,230 +83,273 @@ export default function DashboardPage() {
   const [assignLoading, setAssignLoading] = useState(false);
 
   const loadOrders = useCallback(async () => {
-    if (!user?._id) return;
+    if (!userId) return;
     try {
       setLoading(true);
-      const data = await getOrdersRequest({ role: 'LOGISTICIAN', userId: user._id });
-      const list = Array.isArray(data) ? data : data.orders || [];
+      const data = await getOrdersRequest({ role: 'LOGISTICIAN', userId });
+      const list = normalizeList(data);
       setOrders(list);
-      if (list.length && !selectedOrder) setSelectedOrder(list[0]);
+      setSelectedOrderId((current) => {
+        if (current && list.some((order) => order._id === current)) return current;
+        return list[0]?._id || '';
+      });
     } catch (err) {
-      console.error(err);
-      showToast('Ошибка загрузки');
+      showToast(getApiErrorMessage(err, 'Ошибка загрузки заказов'));
     } finally {
       setLoading(false);
     }
-  }, [user?._id]);
+  }, [showToast, userId]);
 
   const loadFleet = useCallback(async () => {
-    if (!user?._id) return;
+    if (!userId) return;
     try {
-      const [v, d] = await Promise.all([getVehiclesRequest(user._id), getDriversRequest(user._id)]);
-      setVehicles(Array.isArray(v) ? v : []);
-      setDrivers(Array.isArray(d) ? d : []);
-      if (Array.isArray(v) && v.length) setSelectedVehicleId(v[0]._id);
-      if (Array.isArray(d) && d.length) setSelectedDriverId(d[0]._id);
-    } catch (err) { console.error(err); }
-  }, [user?._id]);
+      const [vehicleData, driverData] = await Promise.all([
+        getVehiclesRequest(userId),
+        getDriversRequest(userId),
+      ]);
+      const vehicleList = normalizeList(vehicleData);
+      const driverList = normalizeList(driverData);
+      setVehicles(vehicleList);
+      setDrivers(driverList);
+      setSelectedVehicleId((current) => current || vehicleList[0]?._id || '');
+      setSelectedDriverId((current) => current || driverList[0]?._id || '');
+    } catch (err) {
+      showToast(getApiErrorMessage(err, 'Ошибка загрузки автопарка'));
+    }
+  }, [showToast, userId]);
 
-  useEffect(() => { loadOrders(); loadFleet(); }, [loadOrders, loadFleet]);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      loadOrders();
+      loadFleet();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [loadOrders, loadFleet]);
 
-  const activeOrders = orders.filter(o => !['DELIVERED'].includes(o.status));
-  const allOrders = orders;
-  const filtered = filter === 'active' ? activeOrders : allOrders;
+  const activeOrders = useMemo(
+    () => orders.filter((order) => ACTIVE_ORDER_STATUSES.includes(order.status)),
+    [orders],
+  );
+  const filtered = filter === 'active' ? activeOrders : orders;
+  const selectedOrder = orders.find((order) => order._id === selectedOrderId) || filtered[0] || null;
 
-  const getStatus = s => STATUS_DETAIL[s] || { label: s || '?', cls: 'gray' };
-  const formatDate = d => {
-    if (!d) return '—';
-    const date = new Date(d);
-    return isNaN(date.getTime()) ? '—' : date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  const stats = useMemo(() => {
+    const inTransit = orders.filter((order) => ['ASSIGNED', 'AT_PICKUP', 'IN_TRANSIT', 'AT_DROP'].includes(order.status)).length;
+    const openBids = orders.filter((order) => ['PUBLISHED', 'NEGOTIATION'].includes(order.status)).length;
+    const revenue = orders.reduce((sum, order) => sum + (Number(getOrderPrice(order)) || 0), 0);
+
+    return [
+      { label: 'Активные рейсы', value: activeOrders.length, icon: Route },
+      { label: 'В работе', value: inTransit, icon: Truck },
+      { label: 'Открыты торги', value: openBids, icon: DollarSign },
+      { label: 'Потенциал', value: formatMoney(revenue), icon: Package },
+    ];
+  }, [activeOrders.length, orders]);
+
+  const openBidModal = (order) => {
+    setBidOrder(order);
+    setBidAmount('');
+    setBidComment('');
   };
 
   const onPlaceBid = async () => {
     if (!bidOrder?._id) return;
+    const amount = Number(bidAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showToast('Укажите сумму ставки');
+      return;
+    }
+
     try {
       setBidLoading(true);
-      await placeBidRequest(bidOrder._id, { amount: Number(bidAmount), comment: bidComment, logisticianId: user._id, logisticianName: user.name });
+      await placeBidRequest(bidOrder._id, {
+        amount,
+        comment: bidComment.trim(),
+        logisticianId: userId,
+      });
       showToast('Ставка отправлена');
       setBidOrder(null);
       await loadOrders();
-    } catch { showToast('Ошибка'); } finally { setBidLoading(false); }
+    } catch (err) {
+      showToast(getApiErrorMessage(err, 'Не удалось отправить ставку'));
+    } finally {
+      setBidLoading(false);
+    }
+  };
+
+  const openAssignModal = (order) => {
+    setAssignOrder(order);
+    setSelectedVehicleId((current) => current || vehicles[0]?._id || '');
+    setSelectedDriverId((current) => current || drivers[0]?._id || '');
   };
 
   const onAssign = async () => {
     if (!assignOrder?._id) return;
+    if (!selectedVehicleId && !selectedDriverId) {
+      showToast('Выберите машину или водителя');
+      return;
+    }
+
     try {
       setAssignLoading(true);
-      await assignOrderRequest(assignOrder._id, { vehicleId: selectedVehicleId || undefined, driverId: selectedDriverId || undefined });
-      showToast('Назначено');
+      await assignOrderRequest(assignOrder._id, {
+        vehicleId: selectedVehicleId || undefined,
+        driverId: selectedDriverId || undefined,
+      });
+      showToast('Машина назначена');
       setAssignOrder(null);
-      await loadOrders();
-    } catch { showToast('Ошибка'); } finally { setAssignLoading(false); }
+      await Promise.all([loadOrders(), loadFleet()]);
+    } catch (err) {
+      showToast(getApiErrorMessage(err, 'Не удалось назначить'));
+    } finally {
+      setAssignLoading(false);
+    }
   };
 
-  const sel = selectedOrder;
-  const selCargo = sel?.cargoDetails || sel?.cargo || {};
-  const selStatus = sel ? getStatus(sel.status) : null;
-  const selPrice = sel?.pricing?.customerOffer || sel?.price || null;
-  const capacityPct = selCargo.weight ? Math.min(100, Math.round((selCargo.weight / 20) * 100)) : 0;
+  const selectedCargo = getOrderCargo(selectedOrder || {});
+  const selectedVehicle = getOrderVehicle(selectedOrder || {});
+  const selectedDriver = getOrderDriver(selectedOrder || {});
+  const selectedStatus = selectedOrder ? getStatus(selectedOrder.status) : null;
+  const selectedCapacity = capacityPercent(selectedCargo.weight, selectedVehicle?.capacity?.weight);
+  const selectedCustomer = selectedOrder?.customer;
+  const selectedBids = selectedOrder?.bids || [];
 
   return (
     <div className="app-layout">
-      {/* CENTER — Shipment cards */}
-      <div className="main-center">
+      <main className="main-center">
         <div className="page-header">
-          <h1 className="page-title">Управление грузами</h1>
+          <div>
+            <h1 className="page-title">Обзор логиста</h1>
+            <p className="page-subtitle">Заказы, торги и назначение автопарка из живого API</p>
+          </div>
           <button className="btn btn-primary" onClick={loadOrders} disabled={loading}>
-            <Plus size={16} /> Обновить
+            <RefreshCw size={16} /> {loading ? 'Обновляю...' : 'Обновить'}
           </button>
         </div>
 
+        <div className="kpi-grid">
+          {stats.map((item) => {
+            const Icon = item.icon;
+            return (
+              <div className="kpi-item" key={item.label}>
+                <div className="kpi-icon"><Icon size={18} /></div>
+                <div>
+                  <div className="kpi-label">{item.label}</div>
+                  <div className="kpi-value">{item.value}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
         <div className="filter-tabs">
-          <button className={`filter-tab ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>
-            Все <span className="count">{allOrders.length}</span>
-          </button>
           <button className={`filter-tab ${filter === 'active' ? 'active' : ''}`} onClick={() => setFilter('active')}>
             Активные <span className="count">{activeOrders.length}</span>
+          </button>
+          <button className={`filter-tab ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>
+            Все <span className="count">{orders.length}</span>
           </button>
         </div>
 
         {filtered.length === 0 ? (
-          <div className="empty-state"><Truck size={40} /><p>Нет грузов</p></div>
+          <div className="empty-state"><Truck size={40} /><p>Нет заказов для логиста</p></div>
         ) : (
           <div className="shipments-grid">
             {filtered.map((order, idx) => {
-              const cargo = order.cargoDetails || order.cargo || {};
+              const cargo = getOrderCargo(order);
+              const status = getStatus(order.status);
               const CardTruckIcon = CARD_TRUCKS[idx % CARD_TRUCKS.length];
-              return (
-                <div key={order._id}
-                  className={`shipment-card ${selectedOrder?._id === order._id ? 'selected' : ''}`}
-                  onClick={() => { setSelectedOrder(order); setDetailTab('info'); }}>
 
+              return (
+                <button
+                  key={order._id}
+                  type="button"
+                  className={`shipment-card ${selectedOrder?._id === order._id ? 'selected' : ''}`}
+                  onClick={() => { setSelectedOrderId(order._id); setDetailTab('info'); }}
+                >
                   <div className="shipment-header">
                     <div>
-                      <div className="shipment-number-label">Shipment number</div>
-                      <div className="shipment-number">VC-{order._id?.slice(-8).toUpperCase()}</div>
+                      <div className="shipment-number-label">Номер заказа</div>
+                      <div className="shipment-number">{orderCode(order)}</div>
                     </div>
-                    <div className="shipment-truck-img">
-                      <CardTruckIcon />
-                    </div>
+                    <span className={`badge badge-${status.cls}`}>{status.label}</span>
                   </div>
 
-                  <div className="route-line">
-                    <div className="route-point">
-                      <div className="route-dot origin" />
-                      <div>
-                        <div className="route-city">{order.route?.from?.city || '?'}</div>
-                        <div className="route-address">{order.route?.from?.address || ''}</div>
-                      </div>
-                    </div>
-                    <div className="route-connector" />
-                    <div className="route-point">
-                      <div className="route-dot dest" />
-                      <div>
-                        <div className="route-city">{order.route?.to?.city || '?'}</div>
-                        <div className="route-address">{order.route?.to?.address || ''}</div>
+                  <div className="shipment-truck-row">
+                    <div className="shipment-truck-img"><CardTruckIcon /></div>
+                    <div>
+                      <div className="shipment-buyer-name">{cargo.description || 'Груз без описания'}</div>
+                      <div className="shipment-buyer-company">
+                        {formatWeight(cargo.weight)} · {formatVolume(cargo.volume)}
                       </div>
                     </div>
                   </div>
 
-                  <div className="shipment-buyer-section">
-                    <div className="shipment-buyer-label">Buyer</div>
-                    <div className="shipment-buyer-name">{cargo.description || '—'}</div>
-                    <div className="shipment-buyer-company">{cargo.weight || 0} т · {formatDate(order.createdAt)}</div>
+                  <RouteBlock order={order} />
+
+                  <div className="shipment-card-footer">
+                    <span>{formatDate(order.createdAt)}</span>
+                    <strong>{formatMoney(getOrderPrice(order), order.pricing?.currency || 'RUB')}</strong>
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>
         )}
-      </div>
+      </main>
 
-      {/* RIGHT — Detail panel */}
-      <div className="main-right">
-        {sel ? (
+      <aside className="main-right">
+        {selectedOrder ? (
           <>
             <div className="detail-header">
-              <div className="detail-id">VC-{sel._id?.slice(-8).toUpperCase()}</div>
-              <div className={`detail-status ${selStatus.cls}`}>
+              <div>
+                <div className="detail-id">{orderCode(selectedOrder)}</div>
+                <div className="detail-subtitle">{formatDate(selectedOrder.createdAt, { day: 'numeric', month: 'long', year: 'numeric' })}</div>
+              </div>
+              <div className={`detail-status ${selectedStatus.cls}`}>
                 <span className="dot" />
-                {selStatus.label}
+                {selectedStatus.label}
               </div>
             </div>
 
             <div className="detail-actions">
-              {['PUBLISHED', 'NEGOTIATION'].includes(sel.status) && (
-                <button className="btn btn-primary btn-sm" onClick={() => { setBidOrder(sel); setBidAmount('25000'); setBidComment(''); }}>
+              {['PUBLISHED', 'NEGOTIATION'].includes(selectedOrder.status) && (
+                <button className="btn btn-primary btn-sm" onClick={() => openBidModal(selectedOrder)}>
                   <DollarSign size={14} /> Ставка
                 </button>
               )}
-              {sel.status === 'APPROVED' && (
-                <button className="btn btn-success btn-sm" onClick={() => setAssignOrder(sel)}>
+              {selectedOrder.status === 'APPROVED' && (
+                <button className="btn btn-success btn-sm" onClick={() => openAssignModal(selectedOrder)}>
                   <Truck size={14} /> Назначить
                 </button>
               )}
-              <button className="btn btn-outline btn-sm"><Phone size={14} /> Звонок</button>
-              <button className="btn btn-outline btn-sm"><Mail size={14} /> Email</button>
             </div>
 
             <div className="detail-tabs">
-              <button className={`detail-tab ${detailTab === 'info' ? 'active' : ''}`} onClick={() => setDetailTab('info')}>Information</button>
-              <button className={`detail-tab ${detailTab === 'vehicle' ? 'active' : ''}`} onClick={() => setDetailTab('vehicle')}>Vehicle info</button>
-              <button className={`detail-tab ${detailTab === 'company' ? 'active' : ''}`} onClick={() => setDetailTab('company')}>Company</button>
-              <button className={`detail-tab ${detailTab === 'billing' ? 'active' : ''}`} onClick={() => setDetailTab('billing')}>Billing</button>
+              <button type="button" className={`detail-tab ${detailTab === 'info' ? 'active' : ''}`} onClick={() => setDetailTab('info')}>Сведения</button>
+              <button type="button" className={`detail-tab ${detailTab === 'vehicle' ? 'active' : ''}`} onClick={() => setDetailTab('vehicle')}>Транспорт</button>
+              <button type="button" className={`detail-tab ${detailTab === 'bids' ? 'active' : ''}`} onClick={() => setDetailTab('bids')}>Ставки</button>
+              <button type="button" className={`detail-tab ${detailTab === 'customer' ? 'active' : ''}`} onClick={() => setDetailTab('customer')}>Заказчик</button>
             </div>
 
             {detailTab === 'info' && (
               <>
                 <div className="section-title">Маршрут</div>
-                <div className="route-line mb-5">
-                  <div className="route-point">
-                    <div className="route-dot origin" />
-                    <div>
-                      <div className="route-city">{sel.route?.from?.city || '?'}</div>
-                      <div className="route-address">{sel.route?.from?.address || ''}</div>
-                    </div>
-                  </div>
-                  <div className="route-connector" />
-                  <div className="route-point">
-                    <div className="route-dot dest" />
-                    <div>
-                      <div className="route-city">{sel.route?.to?.city || '?'}</div>
-                      <div className="route-address">{sel.route?.to?.address || ''}</div>
-                    </div>
-                  </div>
-                </div>
+                <RouteBlock order={selectedOrder} />
 
-                <div className="section-title">Груз</div>
-                <div className="specs-grid mb-5">
-                  <div className="spec-item">
-                    <div className="spec-label">Груз</div>
-                    <div className="spec-value">{selCargo.description || '—'}</div>
-                  </div>
-                  <div className="spec-item">
-                    <div className="spec-label">Вес</div>
-                    <div className="spec-value">{selCargo.weight || 0} т</div>
-                  </div>
-                  <div className="spec-item">
-                    <div className="spec-label">Объём</div>
-                    <div className="spec-value">{selCargo.volume || 0} м³</div>
-                  </div>
-                  <div className="spec-item">
-                    <div className="spec-label">Цена</div>
-                    <div className="spec-value" style={{color:'var(--accent)'}}>{selPrice ? `${selPrice}₽` : 'Дог.'}</div>
-                  </div>
-                  <div className="spec-item">
-                    <div className="spec-label">Дата</div>
-                    <div className="spec-value">{formatDate(sel.createdAt)}</div>
-                  </div>
+                <div className="section-title">Груз и цена</div>
+                <div className="specs-grid detail-specs">
+                  <div className="spec-item"><Package size={15} /><div className="spec-label">Груз</div><div className="spec-value">{selectedCargo.description || '—'}</div></div>
+                  <div className="spec-item"><Truck size={15} /><div className="spec-label">Вес</div><div className="spec-value">{formatWeight(selectedCargo.weight)}</div></div>
+                  <div className="spec-item"><MapPin size={15} /><div className="spec-label">Объём</div><div className="spec-value">{formatVolume(selectedCargo.volume)}</div></div>
+                  <div className="spec-item"><DollarSign size={15} /><div className="spec-label">Цена</div><div className="spec-value accent-text">{formatMoney(getOrderPrice(selectedOrder), selectedOrder.pricing?.currency || 'RUB')}</div></div>
+                  <div className="spec-item"><Calendar size={15} /><div className="spec-label">Дата</div><div className="spec-value">{formatDate(selectedOrder.createdAt)}</div></div>
                 </div>
 
                 <div className="section-title">Загрузка</div>
                 <div className="capacity-box">
                   <div className="capacity-bar-wrap">
-                    <div className="capacity-bar" style={{ width: `${capacityPct}%` }}>
-                      {capacityPct}%
-                    </div>
+                    <div className="capacity-bar" style={{ width: `${selectedCapacity}%` }}>{selectedCapacity}%</div>
                   </div>
                 </div>
               </>
@@ -271,56 +357,70 @@ export default function DashboardPage() {
 
             {detailTab === 'vehicle' && (
               <div className="vehicle-info-tab">
-                <div className="section-title mb-3">Load capacity</div>
-                <CapacityTruck percent={capacityPct} />
+                <div className="section-title mb-3">Загрузка кузова</div>
+                <CapacityTruck percent={selectedCapacity} />
 
-                <div className="specs-grid mb-5" style={{gridTemplateColumns:'repeat(5,1fr)'}}>
-                  <div className="spec-item" style={{textAlign:'left'}}><div className="spec-label">Truck</div><div className="spec-value">Iveco 80E190</div></div>
-                  <div className="spec-item" style={{textAlign:'left'}}><div className="spec-label">Weight</div><div className="spec-value">{selCargo.weight || 7340} kg</div></div>
-                  <div className="spec-item" style={{textAlign:'left'}}><div className="spec-label">Pallets</div><div className="spec-value">13/20</div></div>
-                  <div className="spec-item" style={{textAlign:'left'}}><div className="spec-label">Space</div><div className="spec-value">{capacityPct}% / {100 - capacityPct}%</div></div>
-                  <div className="spec-item" style={{textAlign:'left'}}><div className="spec-label">Volume</div><div className="spec-value">{selCargo.volume || 18} м³</div></div>
-                </div>
-
-                <div className="section-title mb-3">Route map</div>
-                <div className="map-image-box">
-                  <img src="/assets/images/route_map.png" alt="Map" />
+                <div className="specs-grid detail-specs">
+                  <div className="spec-item"><div className="spec-label">Машина</div><div className="spec-value">{[selectedVehicle?.brand, selectedVehicle?.model].filter(Boolean).join(' ') || '—'}</div></div>
+                  <div className="spec-item"><div className="spec-label">Госномер</div><div className="spec-value">{selectedVehicle?.plateNumber || '—'}</div></div>
+                  <div className="spec-item"><div className="spec-label">Тип</div><div className="spec-value">{VEHICLE_TYPE_LABELS[selectedVehicle?.type] || selectedVehicle?.type || '—'}</div></div>
+                  <div className="spec-item"><div className="spec-label">Грузоподъёмность</div><div className="spec-value">{formatWeight(selectedVehicle?.capacity?.weight)}</div></div>
+                  <div className="spec-item"><div className="spec-label">Водитель</div><div className="spec-value">{selectedDriver?.name || '—'}</div></div>
+                  <div className="spec-item"><div className="spec-label">Телефон</div><div className="spec-value">{selectedDriver?.phone || '—'}</div></div>
                 </div>
               </div>
             )}
 
-            {detailTab === 'company' && (
-              <>
-                <div className="section-title">Заказчик</div>
-                {sel.customer ? (
-                  <div>
-                    <div className="font-bold text-sm mb-3">{sel.customer.name}</div>
-                    <div className="text-xs text-muted">{sel.customer.email}</div>
+            {detailTab === 'bids' && (
+              <div className="bid-list">
+                {selectedBids.length === 0 ? (
+                  <div className="text-sm text-muted">Ставок пока нет</div>
+                ) : selectedBids.map((bid) => (
+                  <div className="bid-item" key={bid._id}>
+                    <div>
+                      <div className="font-bold text-sm">{bid.logistician?.company?.name || bid.logistician?.name || 'Логист'}</div>
+                      <div className="text-xs text-muted">{formatDate(bid.createdAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>
+                    </div>
+                    <div className="bid-price">{formatMoney(bid.amount, bid.currency || 'RUB')}</div>
+                    <span className="badge badge-gray">{bid.status}</span>
                   </div>
-                ) : (
-                  <div className="text-sm text-muted">Информация недоступна</div>
-                )}
-              </>
+                ))}
+              </div>
+            )}
+
+            {detailTab === 'customer' && (
+              <div className="customer-block">
+                <div className="customer-avatar"><User size={18} /></div>
+                <div>
+                  <div className="font-bold">{selectedCustomer?.company?.name || selectedCustomer?.name || 'Заказчик'}</div>
+                  <div className="customer-line"><Mail size={13} /> {selectedCustomer?.email || selectedCustomer?.company?.email || '—'}</div>
+                  <div className="customer-line"><Phone size={13} /> {selectedCustomer?.phone || selectedCustomer?.company?.phone || '—'}</div>
+                  <div className="customer-line"><Users size={13} /> Рейтинг {selectedCustomer?.rating || '—'}</div>
+                </div>
+              </div>
             )}
           </>
         ) : (
           <div className="empty-state">
             <Truck size={40} />
-            <p>Выберите груз для просмотра</p>
+            <p>Выберите заказ для просмотра</p>
           </div>
         )}
-      </div>
+      </aside>
 
-      {/* Bid Modal */}
-      <Modal visible={!!bidOrder} onClose={() => setBidOrder(null)} title="Сделать ставку"
-        subtitle={bidOrder ? `${bidOrder.route?.from?.city} → ${bidOrder.route?.to?.city}` : ''}>
+      <Modal
+        visible={!!bidOrder}
+        onClose={() => setBidOrder(null)}
+        title="Сделать ставку"
+        subtitle={bidOrder ? `${getOrderRoute(bidOrder).from?.city || '?'} → ${getOrderRoute(bidOrder).to?.city || '?'}` : ''}
+      >
         <div className="input-group mb-4">
-          <label className="input-label">Сумма (₽)</label>
-          <input className="input" type="number" value={bidAmount} onChange={e => setBidAmount(e.target.value)} />
+          <label className="input-label">Сумма</label>
+          <input className="input" type="number" min="1" value={bidAmount} onChange={(e) => setBidAmount(e.target.value)} />
         </div>
         <div className="input-group mb-4">
           <label className="input-label">Комментарий</label>
-          <input className="input" placeholder="Опционально" value={bidComment} onChange={e => setBidComment(e.target.value)} />
+          <input className="input" value={bidComment} onChange={(e) => setBidComment(e.target.value)} />
         </div>
         <div className="modal-actions">
           <button className="btn btn-primary w-full" onClick={onPlaceBid} disabled={bidLoading}>{bidLoading ? 'Отправка...' : 'Отправить'}</button>
@@ -328,20 +428,23 @@ export default function DashboardPage() {
         </div>
       </Modal>
 
-      {/* Assign Modal */}
-      <Modal visible={!!assignOrder} onClose={() => setAssignOrder(null)} title="Назначить машину">
+      <Modal visible={!!assignOrder} onClose={() => setAssignOrder(null)} title="Назначить рейс">
         <div className="input-group mb-4">
           <label className="input-label">Машина</label>
-          <select className="select" value={selectedVehicleId} onChange={e => setSelectedVehicleId(e.target.value)}>
-            {vehicles.length === 0 && <option value="">Нет машин</option>}
-            {vehicles.map(v => <option key={v._id} value={v._id}>{v.brand} ({v.plateNumber})</option>)}
+          <select className="select" value={selectedVehicleId} onChange={(e) => setSelectedVehicleId(e.target.value)}>
+            <option value="">Без машины</option>
+            {vehicles.map((vehicle) => (
+              <option key={vehicle._id} value={vehicle._id}>{vehicle.brand} · {vehicle.plateNumber}</option>
+            ))}
           </select>
         </div>
         <div className="input-group mb-4">
           <label className="input-label">Водитель</label>
-          <select className="select" value={selectedDriverId} onChange={e => setSelectedDriverId(e.target.value)}>
-            {drivers.length === 0 && <option value="">Нет водителей</option>}
-            {drivers.map(d => <option key={d._id} value={d._id}>{d.name}</option>)}
+          <select className="select" value={selectedDriverId} onChange={(e) => setSelectedDriverId(e.target.value)}>
+            <option value="">Без водителя</option>
+            {drivers.map((driver) => (
+              <option key={driver._id} value={driver._id}>{driver.name} · {driver.phone || driver.telegramId || driver.email || 'контакт не указан'}</option>
+            ))}
           </select>
         </div>
         <div className="modal-actions">
