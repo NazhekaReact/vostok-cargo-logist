@@ -1,4 +1,4 @@
-export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5051';
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://vosto-cargo-back-production-10e2.up.railway.app';
 
 export const ORDER_STATUSES = {
   DRAFT: { label: 'Черновик', cls: 'gray' },
